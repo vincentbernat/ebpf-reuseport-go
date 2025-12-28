@@ -8,6 +8,7 @@ package main
 import (
 	"errors"
 	"net"
+	"os"
 	"sync"
 	"syscall"
 	"testing"
@@ -80,6 +81,7 @@ func TestUDPWorkerBalancing(t *testing.T) {
 
 	// Start each worker
 	var wg sync.WaitGroup
+	done := make(chan bool)
 	receivedPackets := make([]int, workers)
 	for worker := range workers {
 		conn := conns[worker]
@@ -87,9 +89,15 @@ func TestUDPWorkerBalancing(t *testing.T) {
 		wg.Go(func() {
 			payload := make([]byte, 9000)
 			for {
+				conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 				if _, err := conn.Read(payload); err != nil {
-					if errors.Is(err, net.ErrClosed) {
-						return
+					if errors.Is(err, os.ErrDeadlineExceeded) {
+						select {
+						case <-done:
+							return
+						default:
+							continue
+						}
 					}
 					t.Logf("Read() error:\n%+v", err)
 				}
@@ -112,11 +120,11 @@ func TestUDPWorkerBalancing(t *testing.T) {
 	}
 
 	// Close all listening sockets
-	time.Sleep(10 * time.Millisecond)
+	close(done)
+	wg.Wait()
 	for worker := range workers {
 		conns[worker].Close()
 	}
-	wg.Wait()
 
 	// Check the number of packets received and their repartition
 	got := 0
@@ -143,6 +151,7 @@ func TestZeroDowntime(t *testing.T) {
 
 	// Start the first set of workers
 	var wg1 sync.WaitGroup
+	done1 := make(chan bool)
 	receivedPackets1 := make([]int, workers)
 	for worker := range workers {
 		conn := conns1[worker]
@@ -150,9 +159,15 @@ func TestZeroDowntime(t *testing.T) {
 		wg1.Go(func() {
 			payload := make([]byte, 9000)
 			for {
+				conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 				if _, err := conn.Read(payload); err != nil {
-					if errors.Is(err, net.ErrClosed) {
-						return
+					if errors.Is(err, os.ErrDeadlineExceeded) {
+						select {
+						case <-done1:
+							return
+						default:
+							continue
+						}
 					}
 					t.Logf("Read() error:\n%+v", err)
 				}
@@ -197,6 +212,7 @@ func TestZeroDowntime(t *testing.T) {
 	// Start the second set of workers
 	fds2, conns2 := setupSockets(t, workers, conns1[0].LocalAddr().String())
 	var wg2 sync.WaitGroup
+	done2 := make(chan bool)
 	receivedPackets2 := make([]int, workers)
 	for worker := range workers {
 		conn := conns2[worker]
@@ -204,9 +220,15 @@ func TestZeroDowntime(t *testing.T) {
 		wg2.Go(func() {
 			payload := make([]byte, 9000)
 			for {
+				conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 				if _, err := conn.Read(payload); err != nil {
-					if errors.Is(err, net.ErrClosed) {
-						return
+					if errors.Is(err, os.ErrDeadlineExceeded) {
+						select {
+						case <-done2:
+							return
+						default:
+							continue
+						}
 					}
 					t.Logf("Read() error:\n%+v", err)
 				}
@@ -217,10 +239,11 @@ func TestZeroDowntime(t *testing.T) {
 
 	// Switch to the second set of workers and stop the first set
 	setupEBPF(t, fds2)
+	close(done1)
+	wg1.Wait()
 	for worker := range workers {
 		conns1[worker].Close()
 	}
-	wg1.Wait()
 
 	// Wait a bit and stop sending packets
 	time.Sleep(10 * time.Millisecond)
@@ -228,10 +251,11 @@ func TestZeroDowntime(t *testing.T) {
 
 	// Stop the second set of workers
 	time.Sleep(10 * time.Millisecond)
+	close(done2)
+	wg2.Wait()
 	for worker := range workers {
 		conns2[worker].Close()
 	}
-	wg2.Wait()
 
 	totalReceivedPackets := 0
 	for worker, received := range receivedPackets1 {
