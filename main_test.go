@@ -1,4 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Free Mobile
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//go:build linux
 
 package main
 
@@ -13,10 +16,41 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func setupEBPF(t *testing.T, fds []uintptr) {
+	// Load the eBPF collection.
+	spec, err := loadReuseport()
+	if err != nil {
+		t.Fatalf("loadVariables() error:\n%+v", err)
+	}
+	// Set "num_sockets" global variable to the number of file descriptors we will register
+	if err := spec.Variables["num_sockets"].Set(uint32(len(fds))); err != nil {
+		t.Fatalf("NumSockets.Set() error:\n%+v", err)
+	}
+	// Load the map and the program into the kernel.
+	var objs reuseportObjects
+	if err := spec.LoadAndAssign(&objs, nil); err != nil {
+		t.Fatalf("loadReuseportObjects() error:\n%+v", err)
+	}
+	t.Cleanup(func() { objs.Close() })
+	// Assign the file descriptors to the socket map.
+	for worker, fd := range fds {
+		if err := objs.reuseportMaps.SocketMap.Put(uint32(worker), uint64(fd)); err != nil {
+			t.Fatalf("SocketMap.Put() error:\n%+v", err)
+		}
+	}
+	// Attach the eBPF program to the first socket.
+	socketFD := int(fds[0])
+	progFD := objs.reuseportPrograms.ReuseportBalanceProg.FD()
+	if err := unix.SetsockoptInt(socketFD, unix.SOL_SOCKET, unix.SO_ATTACH_REUSEPORT_EBPF, progFD); err != nil {
+		t.Fatalf("SetsockoptInt() error:\n%+v", err)
+	}
+
+}
+
 func TestUDPWorkerBalancing(t *testing.T) {
 	workers := 10
 
-	// Fro each worker, setup the listening sockets with SO_REUSEPORT
+	// For each worker, setup the listening sockets with SO_REUSEPORT
 	var fds []uintptr
 	var conns []*net.UDPConn
 	var err error
@@ -41,10 +75,7 @@ func TestUDPWorkerBalancing(t *testing.T) {
 	}
 
 	// Setup eBPF
-	if err := setupReuseportEBPF(fds); err != nil {
-		t.Fatalf("setupReuseportEBPF() error:\n%+v", err)
-	}
-	defer cleanupReuseportEBPF()
+	setupEBPF(t, fds)
 
 	// Start each worker
 	var wg sync.WaitGroup
@@ -91,7 +122,7 @@ func TestUDPWorkerBalancing(t *testing.T) {
 	for worker := range workers {
 		received := receivedPackets[worker]
 		if received < sentPackets/workers*7/10 || received > sentPackets/workers*13/10 {
-			t.Errorf("receivedPackets[%d] = %d but expected ~ %d", worker, received, sentPackets/worker)
+			t.Errorf("receivedPackets[%d] = %d but expected ~ %d", worker, received, sentPackets/workers)
 		} else {
 			t.Logf("receivedPackets[%d] = %d", worker, received)
 		}
