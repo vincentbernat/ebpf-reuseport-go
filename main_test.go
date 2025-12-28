@@ -89,6 +89,12 @@ func TestUDPWorkerBalancing(t *testing.T) {
 		wg.Go(func() {
 			payload := make([]byte, 9000)
 			for {
+				// In Go, it is difficult to do a graceful shutdown of an UDP
+				// socket. The only way to unblock a Read() is either by
+				// receiving a packet or with an error. Closing the socket to
+				// get an error also discards the data. Therefore, a timeout is
+				// used, but this delays the correct shutdown and it actively
+				// pools the socket.
 				conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 				if _, err := conn.Read(payload); err != nil {
 					if errors.Is(err, os.ErrDeadlineExceeded) {
