@@ -134,7 +134,8 @@ func TestUDPWorkerBalancing(t *testing.T) {
 	}
 }
 
-// TestZeroDowntime checks another set of workers can take over without any downtime
+// TestZeroDowntime checks another set of workers can take over without any
+// downtime.
 func TestZeroDowntime(t *testing.T) {
 	workers := 10
 	fds1, conns1 := setupSockets(t, workers, "127.0.0.1:0")
@@ -156,6 +157,11 @@ func TestZeroDowntime(t *testing.T) {
 					t.Logf("Read() error:\n%+v", err)
 				}
 				*packets++
+				// First worker is a bit slow. This enables to test that
+				// remaining packets in queue are not lost.
+				if worker == 0 {
+					time.Sleep(time.Millisecond / 10)
+				}
 			}
 		})
 	}
