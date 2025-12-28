@@ -16,6 +16,30 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func setupSockets(t *testing.T, workers int, listeningAddr string) (fds []uintptr, conns []*net.UDPConn) {
+	// For each worker, setup the listening sockets with SO_REUSEPORT
+	var err error
+	listenConfig := net.ListenConfig{
+		Control: func(_, _ string, c syscall.RawConn) error {
+			c.Control(func(fd uintptr) {
+				err = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+				fds = append(fds, fd)
+			})
+			return err
+		},
+	}
+	for range workers {
+		pconn, err := listenConfig.ListenPacket(t.Context(), "udp", listeningAddr)
+		if err != nil {
+			t.Fatalf("ListenPacket() error:\n%+v", err)
+		}
+		udpConn := pconn.(*net.UDPConn)
+		listeningAddr = udpConn.LocalAddr().String()
+		conns = append(conns, udpConn)
+	}
+	return
+}
+
 func setupEBPF(t *testing.T, fds []uintptr) {
 	// Load the eBPF collection.
 	spec, err := loadReuseport()
@@ -47,34 +71,11 @@ func setupEBPF(t *testing.T, fds []uintptr) {
 
 }
 
+// TestUDPWorkerBalancing tests that incoming connections are load balanced
+// evenly over the various workers.
 func TestUDPWorkerBalancing(t *testing.T) {
 	workers := 10
-
-	// For each worker, setup the listening sockets with SO_REUSEPORT
-	var fds []uintptr
-	var conns []*net.UDPConn
-	var err error
-	listeningAddr := "127.0.0.1:0"
-	listenConfig := net.ListenConfig{
-		Control: func(_, _ string, c syscall.RawConn) error {
-			c.Control(func(fd uintptr) {
-				err = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
-				fds = append(fds, fd)
-			})
-			return err
-		},
-	}
-	for range workers {
-		pconn, err := listenConfig.ListenPacket(t.Context(), "udp", listeningAddr)
-		if err != nil {
-			t.Fatalf("ListenPacket() error:\n%+v", err)
-		}
-		udpConn := pconn.(*net.UDPConn)
-		listeningAddr = udpConn.LocalAddr().String()
-		conns = append(conns, udpConn)
-	}
-
-	// Setup eBPF
+	fds, conns := setupSockets(t, workers, "127.0.0.1:0")
 	setupEBPF(t, fds)
 
 	// Start each worker
@@ -99,7 +100,7 @@ func TestUDPWorkerBalancing(t *testing.T) {
 
 	// Connect and send many packets
 	sentPackets := 1000
-	conn, err := net.Dial("udp", listeningAddr)
+	conn, err := net.Dial("udp", conns[0].LocalAddr().String())
 	if err != nil {
 		t.Fatalf("Dial() error:\n%+v", err)
 	}
@@ -130,5 +131,115 @@ func TestUDPWorkerBalancing(t *testing.T) {
 	}
 	if got != sentPackets {
 		t.Errorf("receivedPackets = %d but expected %d", got, sentPackets)
+	}
+}
+
+// TestZeroDowntime checks another set of workers can take over without any downtime
+func TestZeroDowntime(t *testing.T) {
+	workers := 10
+	fds1, conns1 := setupSockets(t, workers, "127.0.0.1:0")
+	setupEBPF(t, fds1)
+
+	// Start the first set of workers
+	var wg1 sync.WaitGroup
+	receivedPackets1 := make([]int, workers)
+	for worker := range workers {
+		conn := conns1[worker]
+		packets := &receivedPackets1[worker]
+		wg1.Go(func() {
+			payload := make([]byte, 9000)
+			for {
+				if _, err := conn.Read(payload); err != nil {
+					if errors.Is(err, net.ErrClosed) {
+						return
+					}
+					t.Logf("Read() error:\n%+v", err)
+				}
+				*packets++
+			}
+		})
+	}
+
+	// Connect and send many packets
+	sentPackets := 0
+	notSentPackets := 0
+	done := make(chan bool)
+	conn, err := net.Dial("udp", conns1[0].LocalAddr().String())
+	if err != nil {
+		t.Fatalf("Dial() error:\n%+v", err)
+	}
+	defer conn.Close()
+	go func() {
+		for {
+			if _, err := conn.Write([]byte("hello world!")); err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				notSentPackets++
+			} else {
+				sentPackets++
+			}
+			select {
+			case <-done:
+				return
+			default:
+			}
+		}
+	}()
+	time.Sleep(10 * time.Millisecond)
+
+	// Start the second set of workers
+	fds2, conns2 := setupSockets(t, workers, conns1[0].LocalAddr().String())
+	var wg2 sync.WaitGroup
+	receivedPackets2 := make([]int, workers)
+	for worker := range workers {
+		conn := conns2[worker]
+		packets := &receivedPackets2[worker]
+		wg2.Go(func() {
+			payload := make([]byte, 9000)
+			for {
+				if _, err := conn.Read(payload); err != nil {
+					if errors.Is(err, net.ErrClosed) {
+						return
+					}
+					t.Logf("Read() error:\n%+v", err)
+				}
+				*packets++
+			}
+		})
+	}
+
+	// Switch to the second set of workers and stop the first set
+	setupEBPF(t, fds2)
+	for worker := range workers {
+		conns1[worker].Close()
+	}
+	wg1.Wait()
+
+	// Wait a bit and stop sending packets
+	time.Sleep(10 * time.Millisecond)
+	close(done)
+
+	// Stop the second set of workers
+	time.Sleep(10 * time.Millisecond)
+	for worker := range workers {
+		conns2[worker].Close()
+	}
+	wg2.Wait()
+
+	totalReceivedPackets := 0
+	for worker, received := range receivedPackets1 {
+		totalReceivedPackets += received
+		t.Logf("receivedPackets1[%d] = %d", worker, received)
+	}
+	for worker, received := range receivedPackets2 {
+		totalReceivedPackets += received
+		t.Logf("receivedPackets2[%d] = %d", worker, received)
+	}
+	if notSentPackets > 0 {
+		t.Errorf("notSentPackets = %d > 0", notSentPackets)
+	}
+	if totalReceivedPackets != sentPackets {
+		t.Errorf("totalReceivedPackets (%d) != sentPackets (%d)", totalReceivedPackets, sentPackets)
 	}
 }
