@@ -17,7 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func setupSockets(t *testing.T, workers int, listeningAddr string) (fds []uintptr, conns []*net.UDPConn) {
+func setupSockets(t *testing.T, workers int, listenAddr string) (fds []uintptr, conns []*net.UDPConn) {
 	// For each worker, setup the listening sockets with SO_REUSEPORT
 	var err error
 	listenConfig := net.ListenConfig{
@@ -30,12 +30,12 @@ func setupSockets(t *testing.T, workers int, listeningAddr string) (fds []uintpt
 		},
 	}
 	for range workers {
-		pconn, err := listenConfig.ListenPacket(t.Context(), "udp", listeningAddr)
+		pconn, err := listenConfig.ListenPacket(t.Context(), "udp", listenAddr)
 		if err != nil {
 			t.Fatalf("ListenPacket() error:\n%+v", err)
 		}
 		udpConn := pconn.(*net.UDPConn)
-		listeningAddr = udpConn.LocalAddr().String()
+		listenAddr = udpConn.LocalAddr().String()
 		conns = append(conns, udpConn)
 	}
 	return
