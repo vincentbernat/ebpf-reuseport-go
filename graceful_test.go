@@ -65,9 +65,6 @@ func TestGracefulRestart(t *testing.T) {
 	go func() {
 		for {
 			if _, err := conn.Write([]byte("hello world!")); err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					return
-				}
 				notSentPackets++
 			} else {
 				sentPackets++
