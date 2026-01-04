@@ -75,7 +75,7 @@ func TestUDPWorkerBalancing(t *testing.T) {
 	}
 
 	// Check the number of packets received and their repartition
-	got := 0
+	totalReceivedPackets := 0
 	for worker := range workers {
 		received := receivedPackets[worker]
 		if received < sentPackets/workers*7/10 || received > sentPackets/workers*13/10 {
@@ -83,9 +83,11 @@ func TestUDPWorkerBalancing(t *testing.T) {
 		} else {
 			t.Logf("receivedPackets[%d] = %d", worker, received)
 		}
-		got += received
+		totalReceivedPackets += received
 	}
-	if got != sentPackets {
-		t.Errorf("receivedPackets = %d but expected %d", got, sentPackets)
+	if totalReceivedPackets != sentPackets {
+		t.Errorf("receivedPackets = %d but expected %d", totalReceivedPackets, sentPackets)
 	}
+	t.Logf("receivedPackets = %d", totalReceivedPackets)
+	t.Logf("sentPackets     = %d", sentPackets)
 }

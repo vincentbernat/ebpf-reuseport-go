@@ -144,4 +144,6 @@ func TestGracefulRestart(t *testing.T) {
 	if totalReceivedPackets != sentPackets {
 		t.Errorf("totalReceivedPackets (%d) != sentPackets (%d)", totalReceivedPackets, sentPackets)
 	}
+	t.Logf("receivedPackets = %d", totalReceivedPackets)
+	t.Logf("sentPackets     = %d", sentPackets)
 }
